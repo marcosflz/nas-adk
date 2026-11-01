@@ -50,7 +50,7 @@ path = "nas/adk/version.py"
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.0"
+version = "0.2.0"
 version_files = ["nas/adk/version.py:__version__"]
 tag_format = "v$version"
 bump_message = "chore(release): Bump version: $current_version → $new_version [skip ci]"
