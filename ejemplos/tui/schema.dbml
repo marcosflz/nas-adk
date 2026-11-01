@@ -1,0 +1,397 @@
+Table aion_reports {
+  id integer [pk]
+  uuid text
+  fleet_aircraft_engine_serial_number integer
+  potential_issue_name text
+  potential_issue_alert1 text
+  potential_issue_alert2 text
+  potential_issue_alert3 text
+  register_at text
+  datetime_process_at text
+  actual_value double
+  ia_value1 double
+  ia_value2 double
+  ia_value3 double
+  ia_worst1 double
+  ia_worst2 double
+  ia_worst3 double
+}
+
+Table fleet_aircraft {
+  id integer [pk]
+  aircraft_serial_number text
+  tenant text
+  registration_number text
+  engine_1_serial_number text
+  engine_2_serial_number text
+  country text
+  is_active bool
+}
+
+Table aion_engine_timelines {
+  id integer [pk]
+  engine integer
+  date_range text
+  aircraft integer
+  plate text
+  position integer
+  tenant text
+}
+
+Table processing_files {
+  id integer [pk]
+  encoded_file_name text
+  decoded_file_name text
+  encoded_file_hash text
+  decoded_file_hash text
+  processing_state integer
+  decoded_file_size_kb double
+  active_pattern_model_version text
+}
+
+Table aion_maintenance_events {
+  id integer [pk]
+  aircraft text
+  engine integer
+  date_event text
+  event text
+  tgt_margin_crit bool
+  eodp_crit bool
+}
+
+Table aion_removal_installations {
+  id integer [pk]
+  engine integer
+  aircraft integer
+  plate text
+  position integer
+  tenant text
+  operation text
+  date text
+  file_hash text
+}
+
+Table flight_records {
+  id integer [pk]
+  processing_file_id integer [unique]
+  flight_timestamp timestamp
+  aircraft_serial_number text
+  engine_1_serial_number text
+  engine_2_serial_number text
+}
+
+Table tactic_anti_ice {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  pattern_model_version text
+  ai_value integer
+  alert_ground boolean
+  alert_flight boolean
+}
+
+Table tactic_slow_start {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  pattern_model_version text
+  start_duration double
+  slow_start bool
+}
+
+Table tactic_bump {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  ng_peak double
+  status text
+  comp_wash bool
+  time_prev double
+  last_datetime text
+}
+
+Table tactic_cbv {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  pattern_model_version text
+  cbv_alert_check bool
+  apu_alert_check bool
+  cbv_ignition_check bool
+  cbv_start_check bool
+  cbv_suspected_cbv_open bool
+  cbv_engine_alert_type text
+  cbv_engine_started text
+  cbv_ng_ramp_type text
+  cbv_tgtmax_at_start double
+  cbv_ng_at_ignition double
+  cbv_temp_rise_before_ignition double
+  cbv_start_duration double
+  cbv_check_start_time double
+  cbv_check_end_time double
+  apu_alert_type text
+  apu_tgt_rise double
+  apu_rise_duration double
+  apu_tgt_start double
+  apu_net_tgt_rise double
+}
+
+Table tactic_chip {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  engine_chip integer
+}
+
+Table tactic_cooldown {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  engine_cooldown_time double
+}
+
+Table tactic_ddt {
+  id integer [pk]
+  processing_file_id integer
+  check_version text
+  tgt_delta double
+  engine_high integer
+  alert_tgt_delta integer
+  alert_periods text
+  alert_details text
+  max_real_details text
+  min_real_details text
+  max_period_summary text
+  min_period_summary text
+}
+
+Table tactic_epac {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  oat double
+  tas double
+  alt double
+  tgt double
+  tgt_margin double
+  ng double
+  np double
+  torque double
+  oil_temp double
+  oil_press double
+  eodp double
+  sbpos double
+  t1 double
+  fflow double
+  wow double
+  tgt_diff double
+  trq_diff double
+  instability_cond text
+  cdp double
+}
+
+Table strategic_eodp_shift {
+  id integer [pk]
+  tactic_epac_id integer
+  check_version text
+  rolling_eodp double
+  difference double
+  difference_direction smallint [note: '-1 below reference, 0 equal, 1 above reference']
+  threshold double
+  alert_check boolean
+  indexes {
+    (tactic_epac_id, check_version) [unique]
+  }
+}
+
+Table strategic_tgtm_shift {
+  id integer [pk]
+  tactic_epac_id integer
+  check_version text
+  rolling_tgt_margin double
+  difference double
+  difference_direction smallint [note: '-1 below reference, 0 equal, 1 above reference']
+  threshold double
+  alert_check boolean
+  indexes {
+    (tactic_epac_id, check_version) [unique]
+  }
+}
+
+Table strategic_tgtm_deterioration {
+  id integer [pk]
+  tactic_epac_id integer
+  check_version text
+  rolling_tgt_margin double
+  recent_window_avg_tgt_margin double
+  difference double
+  difference_direction smallint [note: '-1 below reference, 0 equal, 1 above reference']
+  threshold double
+  alert_check boolean
+  indexes {
+    (tactic_epac_id, check_version) [unique]
+  }
+}
+
+Table flight_events {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  source text
+  event_name text
+  criticality text
+  event_value text
+  pattern_model_version text
+}
+
+Table tactic_exceedance {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  tgt_exceedance_limit double
+  tgt_exceedance_time double
+  torque_exceedance double
+  ng_exceedance_limit double
+  ng_exceedance_time double
+  np_exceedance_limit double
+  np_exceedance_time double
+}
+
+Table tactic_ngs {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  ng_max double
+}
+
+Table tactic_oilp {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  pattern_model_version text
+  alert_eodp bool
+  alert_oil_press_scatter_cruise bool
+  alert_min_oil_press_idle bool
+  alert_oil_press_scatter_idle bool
+  max_oil_press_cruise double
+  max_oil_temp_cruise double
+  eodp double
+  max_oil_press_scatter_cruise double
+  timestamp_max_oil_press_scatter_cruise double
+  min_oil_press_idle double
+  max_oil_press_scatter_idle double
+  timestamp_max_oil_press_scatter_idle double
+}
+
+Table flight_patterns {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  phase_order integer
+  phase text
+  start_time double
+  end_time double
+  confidence double
+  model_version text
+}
+
+Table tactic_start_phase {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  max_tgt_start double
+  alert_tgtmax_in_start_phase integer
+  alert_cross_bleed_valve integer
+  time_to_ignition double
+  ng_at_ignition double
+  alert_ng_at_ignition integer
+  alert_hung_start integer
+  oat double
+  density_alt double
+}
+
+Table tactic_torque_idle {
+  id integer [pk]
+  processing_file_id integer
+  engine_position integer
+  check_version text
+  eng_idle_torque double
+}
+
+Table processing_jobs {
+  id uuid [pk]
+  idempotency_key text [unique]
+  job_type text
+  status text
+  request_payload json
+  total_items integer
+  succeeded_items integer
+  failed_items integer
+  skipped_items integer
+  cancel_requested bool
+  claimed_by_worker text
+  heartbeat_at timestamp
+  created_at timestamp
+  started_at timestamp
+  finished_at timestamp
+  error_message text
+}
+
+Table processing_job_items {
+  id bigint [pk]
+  job_id uuid
+  target_type text
+  target_id integer
+  status text
+  attempt integer
+  started_at timestamp
+  finished_at timestamp
+  error json
+  result json
+}
+
+Table processing_job_events {
+  id bigint [pk]
+  job_id uuid
+  item_id bigint
+  event_type text
+  level text
+  message text
+  payload json
+  created_at timestamp
+}
+
+Ref: flight_patterns.processing_file_id > flight_records.processing_file_id
+Ref: flight_records.processing_file_id > processing_files.id
+Ref: flight_records.aircraft_serial_number > fleet_aircraft.aircraft_serial_number
+Ref: flight_events.processing_file_id > flight_records.processing_file_id
+Ref: tactic_anti_ice.processing_file_id > flight_records.processing_file_id
+Ref: tactic_slow_start.processing_file_id > flight_records.processing_file_id
+Ref: tactic_bump.processing_file_id > flight_records.processing_file_id
+Ref: tactic_cbv.processing_file_id > flight_records.processing_file_id
+Ref: tactic_chip.processing_file_id > flight_records.processing_file_id
+Ref: tactic_cooldown.processing_file_id > flight_records.processing_file_id
+Ref: tactic_ddt.processing_file_id > flight_records.processing_file_id
+Ref: tactic_epac.processing_file_id > flight_records.processing_file_id
+Ref: strategic_eodp_shift.tactic_epac_id > tactic_epac.id
+Ref: strategic_tgtm_shift.tactic_epac_id > tactic_epac.id
+Ref: strategic_tgtm_deterioration.tactic_epac_id > tactic_epac.id
+Ref: tactic_exceedance.processing_file_id > flight_records.processing_file_id
+Ref: tactic_ngs.processing_file_id > flight_records.processing_file_id
+Ref: tactic_oilp.processing_file_id > flight_records.processing_file_id
+Ref: tactic_start_phase.processing_file_id > flight_records.processing_file_id
+Ref: tactic_torque_idle.processing_file_id > flight_records.processing_file_id
+Ref: processing_job_items.job_id > processing_jobs.id
+Ref: processing_job_events.job_id > processing_jobs.id
+Ref: processing_job_events.item_id > processing_job_items.id

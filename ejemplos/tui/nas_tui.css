@@ -1,0 +1,29 @@
+/* Margen interior del área principal */
+#workspace {
+    padding: 0 4;
+}
+
+/* Separación del encabezado y la conversación */
+#brand {
+    margin-bottom: 1;
+}
+
+#conversation {
+    padding: 0 2;
+}
+
+/* Caja de entrada y espacio alrededor */
+#input-box {
+    margin: 1 2;
+    padding: 1 2;
+}
+
+#composer {
+    padding: 0 1;
+}
+
+/* Si quieres que vuelva el panel de tools */
+#activity-panel {
+    width: 30%;
+    padding: 0 2;
+}

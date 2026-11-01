@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling<1.32"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nas-adk"
+description = "Async Agent Development Kit with OpenCode Go, OpenRouter and TypeSafe Jev"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "NAS Team" }]
+requires-python = ">=3.10"
+classifiers = [
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dynamic = ["version"]
+dependencies = [
+  "click>=8.1,<9",
+  "httpx>=0.27,<1",
+  "mcp>=1.27,<2",
+  "pydantic>=2.12,<3",
+  "python-dotenv>=1,<2",
+  "pyyaml>=6.0.2,<7",
+  "rich>=13.9,<15",
+  "typing-extensions>=4.5,<5",
+]
+optional-dependencies.a2a = ["fastapi>=0.133,<1", "uvicorn>=0.34,<1"]
+optional-dependencies.tui = ["textual>=8.2.8,<9"]
+optional-dependencies.build = ["pyinstaller>=6,<7"]
+optional-dependencies.all = [
+  "fastapi>=0.133,<1", "uvicorn>=0.34,<1", "textual>=8.2.8,<9",
+]
+optional-dependencies.dev = [
+  "build>=1.2,<2", "commitizen>=4.8,<5", "hatchling<1.32", "mypy>=1.15",
+  "pytest>=9,<10", "pytest-asyncio>=0.25", "ruff==0.15.17", "twine>=6,<7",
+]
+
+[tool.uv]
+system-certs = true
+
+[tool.hatch.version]
+path = "nas/adk/version.py"
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+version_files = ["nas/adk/version.py:__version__"]
+tag_format = "v$version"
+bump_message = "chore(release): Bump version: $current_version → $new_version [skip ci]"
+update_changelog_on_bump = true
+
+[tool.hatch.build.targets.wheel]
+only-include = ["nas"]
+dev-mode-dirs = ["."]
+
+[project.scripts]
+nas-adk = "nas.adk.cli.main:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = ["."]
+disable_error_code = ["import-not-found", "import-untyped"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
