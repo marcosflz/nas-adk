@@ -43,6 +43,9 @@ def test_release_bump_and_skip(tmp_path: Path) -> None:
         "GITHUB_OUTPUT": str(output),
         "PYTHON": sys.executable,
     }
+    # GitHub Actions exporta el SHA del repositorio real. El test usa un repo
+    # temporal, así que debe dejar que el script resuelva HEAD localmente.
+    env.pop("GITHUB_SHA", None)
 
     def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
