@@ -5,7 +5,7 @@ generación, y OpenRouter o TypeSafe Jev para decisiones estructuradas.
 
 ### Commands
 - `source .venv/bin/activate` antes de cualquier operación
-- Instalar en dev: `uv sync --extra dev --extra tui --extra a2a --inexact`
+- Instalar en dev: `uv sync --extra dev --extra tui --extra a2a --extra anthropic --inexact`
 - Tests: `python -m pytest tests/ -q`
 - Lint: `ruff check nas/adk/ nas/adk/tui/ tests/`
 - Type check: `mypy nas/adk/`
@@ -16,7 +16,7 @@ generación, y OpenRouter o TypeSafe Jev para decisiones estructuradas.
 nas/adk/
 ├── core/            → Event, BaseCallback, CallbackManager
 ├── agents/          → LlmAgent, BaseAgent, Context, Decisor
-├── models/          → ModelRouter, OpenCodeLlm, OpenRouterLlm, TypesafeLlm
+├── models/          → ModelRouter, OpenCodeLlm, OpenRouterLlm, TypesafeLlm, AnthropicLlm, ClaudeCodeLlm
 ├── tools/           → BaseTool, FunctionTool, SubAgentTool
 ├── runners/         → Runner (tool-calling loop, streaming)
 ├── sessions/        → Session, InMemorySessionService, SQLite
@@ -35,6 +35,9 @@ de agentes. Instalar con `uv sync --extra dev --extra tui --inexact`; demo offli
 - `provider="opencode"`: generación con OpenCode Go. No implementa `decide_async()`.
 - `provider="openrouter"`: generación y decisiones con JSON Schema.
 - `provider="typesafe"` (alias `"jev"`): decisiones nativas TypeSafe Jev.
+- `provider="anthropic"`: API oficial (SDK opcional `nas-adk[anthropic]`), herramientas nativas.
+- `provider="claude-code"`: CLI local de Claude Code (suscripción, solo uso personal), herramientas
+  emuladas; no se sirve por A2A/MCP. Sin fallback automático entre ambos ni a otros proveedores.
 - `provider="foundry"` ya no existe.
 
 ### Conventions

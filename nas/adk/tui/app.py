@@ -23,6 +23,7 @@ from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
 from nas.adk.core.callbacks import BaseCallback, CallbackManager
 from nas.adk.core.events.event import Event
+from nas.adk.core.interrupts import ToolDecision
 from nas.adk.runners import Runner
 from nas.adk.sessions import InMemorySessionService, SQLiteSessionService
 from nas.adk.tui.config import Command, TuiConfig
@@ -70,17 +71,24 @@ class _UiCallback(BaseCallback):
     async def on_event(self, event: Event) -> None:
         await self._app.show_event(event)
 
-    async def before_tool_call(self, tool_name: str, args: dict[str, Any]) -> None:
+    async def before_tool_call(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        tool_call_id: str = "",
+        ctx: Any = None,
+        agent_name: str = "",
+    ) -> ToolDecision | None:
         policy = self._app.tool_policy.get(tool_name, "ask")
         if policy == "allow":
-            return
+            return None
         if policy == "ask":
             # One modal at a time, even when the Runner executes parallel-safe tools.
             async with self._approval_lock:
                 screen = _Approval(tool_name, args)
                 try:
                     if await self._app.push_screen_wait(screen):
-                        return
+                        return None
                 finally:
                     if screen in self._app.screen_stack:
                         screen.dismiss(False)

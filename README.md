@@ -20,6 +20,12 @@ uv sync --extra dev --inexact
 pip install nas-adk
 ```
 
+Para el proveedor `anthropic` (SDK oficial, opcional):
+
+```bash
+uv sync --extra dev --extra anthropic --inexact   # o: pip install 'nas-adk[anthropic]'
+```
+
 Para la TUI opcional:
 
 ```bash
@@ -33,9 +39,120 @@ uv sync --extra dev --extra tui --inexact
 | `opencode` | Sí | No | `OPENCODE_API_KEY`, `OPENCODE_MODEL` |
 | `openrouter` | Sí | Sí | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
 | `typesafe` / `jev` | No | Sí | `TYPESAFE_API_KEY`, `JEV_MODEL` |
+| `anthropic` | Sí (herramientas nativas) | Estructurada | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` |
+| `claude-code` | Sí (herramientas emuladas) | Estructurada | `CLAUDE_CODE_BIN`, `CLAUDE_CODE_MODEL` (opcional) |
 
 `ModelRouter(provider="jev", ...)` se normaliza a `"typesafe"`.
 `provider="opencode-go"` se normaliza a `"opencode"`.
+
+### Claude: `anthropic` frente a `claude-code`
+
+Son **dos proveedores explícitos con facturación distinta**. `provider="claude"` se rechaza a
+propósito para que nunca se elija API o suscripción de forma implícita, y NAS **no hace fallback
+automático** de uno a otro (ni a OpenRouter/OpenCode) cuando se agota una cuota.
+
+| | `anthropic` | `claude-code` |
+|---|---|---|
+| Qué es | API Messages oficial (SDK `anthropic`) | Proceso local del CLI oficial de Claude Code |
+| Facturación | API de pago (`ANTHROPIC_API_KEY`) | Límites y condiciones de tu plan de suscripción |
+| Tool calling | Nativo (`tool_use`/`tool_result`) | **Emulado** con salida estructurada (protocolo v1) |
+| Streaming de texto | Sí | No (usa la respuesta completa) |
+| Streaming de argumentos | No se expone (NAS solo recibe llamadas completas) | No |
+| `usage` | Real de la API | Agregado del CLI; coste siempre `None` |
+| Decisiones (`Decisor`) | Salida estructurada (sin `confidence`) | Salida estructurada (sin `confidence`) |
+| Modalidades | Solo texto | Solo texto |
+| Servir por A2A/MCP | Sí | Solo con `allow_personal_use_only=True` (loopback + clave) |
+
+En ambos casos **el Runner ejecuta tus funciones Python** (permisos, `before_tool_call`,
+aprobaciones, límites, sesiones, memoria); el proveedor solo devuelve llamadas normalizadas. Una
+decisión de decisor (`decide_async`) es salida estructurada validada por NAS, **no** una
+decisión probabilística nativa como TypeSafe Jev: no incluye `confidence` ni `probabilities`.
+
+#### `anthropic` (API)
+
+```python
+from nas.adk import Agent, Runner
+from nas.adk.models import ModelRouter
+
+model = ModelRouter(provider="anthropic", model="<id de modelo>")  # ANTHROPIC_API_KEY
+```
+
+- El modelo es obligatorio y lo eliges tú (`ANTHROPIC_MODEL`); NAS no fija nombres de modelo.
+- Los reintentos (con `Retry-After`) son solo los del SDK (`ANTHROPIC_MAX_RETRIES`); el
+  proveedor no añade otro bucle y una herramienta nunca se re-ejecuta por un reintento.
+- `temperature` se ignora (la API actual la rechaza) y queda en `metrics["ignored_parameters"]`.
+- Los bloques nativos (`thinking` con firma, `tool_use`) se guardan en `Event.response_items` y
+  se reenvían intactos al continuar, también desde SQLite. No cambies de proveedor a mitad de
+  una sesión con bloques `thinking`.
+- Si `_truncate_messages` del Runner elimina turnos antiguos, los modelos con *preserved
+  thinking* pueden rechazar el historial editado (`LlmRequestError`): sube `max_context_tokens`.
+- `max_tokens` y `refusal` no son éxito: lanzan `LlmTruncatedError` / `LlmRefusalError`.
+
+#### `claude-code` (suscripción local)
+
+Requisitos: Claude Code instalado y autenticado **por ti** (`claude auth login`) con tu
+suscripción. NAS nunca inicia login, no lee ni copia tokens y no usa endpoints privados.
+
+```python
+model = ModelRouter(provider="claude-code")  # CLAUDE_CODE_MODEL es opcional
+```
+
+- **Uso personal y local.** Las condiciones de Anthropic piden API key para productos o
+  servicios y no permiten enrutar peticiones de terceros por credenciales de suscripción. Este
+  proveedor es para el titular de la suscripción, en su propia máquina y en proyectos propios;
+  la responsabilidad de cumplir las condiciones vigentes es tuya. Por eso `create_a2a_app` y
+  `create_mcp_server` rechazan por defecto agentes que lo usen (`personal_use_only`). Para
+  automatizaciones internas propias pasa `allow_personal_use_only=True`: se exige host en
+  loopback y, en A2A, `api_key` (o `NAS_ADK_API_KEY`). Eso limita la superficie, pero no puede
+  comprobar el origen de los prompts: no reenvíes peticiones de otras personas a estos agentes.
+  Ejemplo: `ejemplos/claude-gastos/a2a_interno.py` (`--offline` no gasta cuota).
+- **Modo estricto de suscripción.** Antes de invocar el CLI se ejecuta `claude auth status
+  --json` y solo se acepta `apiProvider=firstParty` con `authMethod` `claude.ai`/`oauth_token`.
+  Si hay variables que puedan facturar por API (`ANTHROPIC_*`, `CLAUDE_CODE_USE_*`,
+  `AWS_BEARER_TOKEN_BEDROCK`) se lanza `LlmBillingModeError` (política `reject`, por defecto);
+  con `CLAUDE_CODE_ENV_POLICY=scrub` se eliminan **solo del entorno del proceso hijo**
+  (`os.environ` no se toca). `--bare` no se usa: nunca lee OAuth.
+- **Aislamiento.** El CLI solo *decide*: `--tools ""`, `--disallowedTools "mcp__*"`,
+  `--strict-mcp-config`, `--restricted`, `--safe-mode`, `--disable-slash-commands`,
+  `--permission-mode dontAsk`, `--permission-prompts none`, `--no-session-persistence`, `cwd`
+  temporal vacío y variables `CLAUDE_CODE_DISABLE_*`. No se usa `--dangerously-skip-permissions`,
+  `--resume` ni `--continue`: NAS es la única fuente del historial y lo reenvía completo por
+  stdin en cada llamada. Si el contenido supera `CLAUDE_CODE_MAX_INPUT_BYTES` se lanza un error
+  (no se trunca en silencio). El evento `init` se comprueba en cada llamada y, si aparece una
+  herramienta, MCP o plugin externo, se aborta con `LlmIsolationError`.
+- **Qué se envía y qué se ejecuta.** A Anthropic (vía tu CLI) viaja el historial, las
+  instrucciones y los esquemas de tus herramientas. Las funciones se ejecutan localmente en el
+  Runner; los resultados de herramienta se marcan como datos no confiables.
+- **Protocolo v1.** El CLI responde `{"protocol_version":1,"kind":"final","text":...}` o
+  `{"kind":"tool_calls","calls":[{"name":...,"arguments":{...}}]}` mediante `--json-schema`. La
+  raíz del esquema es un objeto plano (la API no admite `anyOf` en la raíz); cada llamada es una
+  unión discriminada por herramienta o, si el esquema es demasiado grande, un esquema de
+  transporte simple. **En ambos casos la validación estricta (nombre permitido, argumentos
+  contra su JSON Schema, número de llamadas) la hace NAS en local.** Si la salida es inválida
+  se reintenta la *inferencia* (`CLAUDE_CODE_PROTOCOL_REPAIRS`), nunca una herramienta.
+- **Cuota agotada.** Un `rate_limit_event` rechazado produce `LlmQuotaError` (sin fallback). NAS
+  no calcula saldo restante ni coste.
+- **Streaming no soportado:** `supports_streaming=False`; `LlmAgent` usa la respuesta completa.
+  El JSON del protocolo no se publica como texto del asistente.
+- **Concurrencia/timeout:** `CLAUDE_CODE_MAX_CONCURRENCY` (1 por defecto) y
+  `CLAUDE_CODE_TIMEOUT`. La cancelación y el timeout terminan el grupo de procesos completo.
+
+Versión probada del CLI: **2.1.319** (mínimo exigido: 2.1.259; se comprueban las flags en
+`claude --help`). Verificado contra el CLI real (2 invocaciones): el `init` reporta
+`apiKeySource: none`, como única herramienta `StructuredOutput`, sin MCP y en modo `dontAsk`
+(más 3 plugins *builtin* del propio CLI, aceptados); respuesta final; y petición de herramienta
+con el esquema discriminado. **No** verificado en vivo: bucle completo con el resultado de la
+herramienta, cuota agotada, y `--max-turns`/`--effort` (se usan solo si aparecen en
+`claude --help`; `--max-turns` no aparece en 2.1.319).
+
+Ejemplos equivalentes con la misma función Python: `ejemplos/claude-gastos/api.py` (API) y
+`ejemplos/claude-gastos/suscripcion.py` (Claude Code).
+
+Solución de problemas: `LlmProcessError: not found` → instala Claude Code o fija
+`CLAUDE_CODE_BIN`; `LlmAuthError` → ejecuta tú `claude auth login`; `LlmBillingModeError` →
+quita las variables citadas o usa `CLAUDE_CODE_ENV_POLICY=scrub`; `LlmIsolationError` → versión
+del CLI con otro comportamiento (abre un issue con la versión); `LlmQuotaError` → espera al
+reinicio de tu cuota.
 
 ### OpenCode Go
 
@@ -339,6 +456,7 @@ Un ejecutable no oculta claves: no incluyas `.env`, bases de datos ni secretos e
 - `ejemplos/decisor-openrouter`: decisor OpenRouter con JSON Schema.
 - `ejemplos/memoria-sqlite`: memoria persistente con OpenCode o demo offline.
 - `ejemplos/tui`: aplicación Textual con OpenCode.
+- `ejemplos/claude-gastos`: la misma función Python con `anthropic` (API) y `claude-code` (suscripción).
 
 ## Variables de entorno
 
@@ -365,6 +483,18 @@ JEV_MODEL=jev-latest
 JEV_BASE_URL=https://api.typesafe.ai/v1/systemone
 JEV_TIMEOUT=5
 JEV_MAX_RETRIES=2
+
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=
+ANTHROPIC_BASE_URL=
+ANTHROPIC_TIMEOUT=120
+ANTHROPIC_MAX_RETRIES=2
+
+CLAUDE_CODE_BIN=claude
+CLAUDE_CODE_MODEL=
+CLAUDE_CODE_TIMEOUT=300
+CLAUDE_CODE_MAX_CONCURRENCY=1
+CLAUDE_CODE_ENV_POLICY=reject
 ```
 
 ## Tests y release

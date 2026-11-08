@@ -51,8 +51,17 @@ def create_mcp_server(
     agent: Agent,
     name: str | None = None,
     instructions: str | None = None,
+    allow_personal_use_only: bool = False,
     **settings: Any,
 ) -> FastMCP:
+    from nas.adk.protocols._sharing import assert_shareable
+
+    # MCP no tiene autenticación propia: con proveedores de uso personal solo se admite loopback.
+    assert_shareable(
+        agent,
+        allow_personal_use_only=allow_personal_use_only,
+        host=str(settings.get("host", "127.0.0.1")),
+    )
     tools = [tool for tool in agent.resolve_tools() if not isinstance(tool, SubAgentTool)]
     return _ADKMCP(
         tools,
@@ -69,12 +78,18 @@ def start_mcp_server(
     port: int = 8011,
     sse_path: str = "/sse",
     message_path: str = "/messages/",
+    allow_personal_use_only: bool = False,
 ) -> None:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError(
             "MCP development server is localhost-only; use an authenticated proxy for remote access"
         )
     mcp = create_mcp_server(
-        agent, host=host, port=port, sse_path=sse_path, message_path=message_path
+        agent,
+        allow_personal_use_only=allow_personal_use_only,
+        host=host,
+        port=port,
+        sse_path=sse_path,
+        message_path=message_path,
     )
     mcp.run(transport=transport)  # type: ignore[arg-type]

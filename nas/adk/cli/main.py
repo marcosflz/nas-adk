@@ -278,7 +278,7 @@ def tui(agent_path: str, session_db: str | None) -> None:
 @click.argument("name")
 @click.option(
     "--provider",
-    type=click.Choice(["opencode", "openrouter"]),
+    type=click.Choice(["opencode", "openrouter", "anthropic", "claude-code"]),
     default="opencode",
     show_default=True,
     help="Generation provider for the scaffold",

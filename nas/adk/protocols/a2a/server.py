@@ -61,10 +61,17 @@ def create_a2a_app(
     base_url: str = "",
     api_key: str = "",
     max_tasks: int = 1000,
+    allow_personal_use_only: bool = False,
+    host: str | None = None,
 ) -> Any:
     """Subset legacy tasks/send y tasks/get; no garantiza A2A moderno completo."""
     from fastapi import FastAPI
 
+    from nas.adk.protocols._sharing import assert_shareable
+
+    assert_shareable(
+        agent, allow_personal_use_only=allow_personal_use_only, api_key=api_key, host=host
+    )
     if max_tasks <= 0:
         raise ValueError("max_tasks must be positive")
 
@@ -147,10 +154,17 @@ def start_a2a_server(
     port: int = 8010,
     base_url: str = "",
     api_key: str = "",
+    allow_personal_use_only: bool = False,
 ) -> None:
     import uvicorn
 
     api_key = api_key or os.getenv("NAS_ADK_API_KEY", "")
     require_network_auth(host, api_key)
-    app = create_a2a_app(agent, base_url=base_url, api_key=api_key)
+    app = create_a2a_app(
+        agent,
+        base_url=base_url,
+        api_key=api_key,
+        allow_personal_use_only=allow_personal_use_only,
+        host=host,
+    )
     uvicorn.run(app, host=host, port=port)

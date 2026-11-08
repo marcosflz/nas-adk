@@ -163,6 +163,62 @@ def build_decision_messages(
     ]
 
 
+def structured_decision_schema(questions: Mapping[str, Any]) -> dict[str, Any]:
+    """Esquema de decisión sin ``confidence`` ni ``probabilities``.
+
+    Solo usa construcciones admitidas por las salidas estructuradas de Claude (sin
+    ``minimum``/``maximum``): los rangos de ``noul`` los valida NAS en local.
+    """
+    answer_properties: dict[str, Any] = {}
+    for name, raw_question in questions.items():
+        question = _jsonable(raw_question)
+        if not isinstance(question, dict):
+            raise ValueError(f"Question {name!r} must be a mapping")
+        kind = _question_type(question)
+        properties: dict[str, Any] = {"type": {"type": "string", "enum": [kind]}}
+        if kind == "noul":
+            properties["noul"] = {"type": "number"}
+        elif kind == "choice":
+            properties["choice"] = {"type": "string", "enum": _criteria_keys(question)}
+        else:
+            criteria = question.get("criteria")
+            if not isinstance(criteria, list) or not criteria:
+                raise ValueError("Score questions require ordered criteria")
+            properties["score"] = {"type": "integer", "enum": list(range(len(criteria)))}
+        answer_properties[str(name)] = {
+            "type": "object",
+            "properties": properties,
+            "required": ["type", kind],
+            "additionalProperties": False,
+        }
+    return {
+        "type": "object",
+        "properties": {
+            "answers": {
+                "type": "object",
+                "properties": answer_properties,
+                "required": list(answer_properties),
+                "additionalProperties": False,
+            }
+        },
+        "required": ["answers"],
+        "additionalProperties": False,
+    }
+
+
+def build_structured_decision_messages(
+    state: str | dict[str, Any] | list[Any],
+    questions: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Como ``build_decision_messages`` pero sin pedir confianza ni probabilidades."""
+    messages = build_decision_messages(state, questions)
+    messages[0]["content"] = messages[0]["content"].replace(
+        " Include confidence when possible.",
+        " Do not include confidence or probabilities.",
+    )
+    return messages
+
+
 def _validate_answer(
     name: str,
     question: Any,
@@ -237,8 +293,10 @@ def normalize_decision_usage(usage: Any) -> dict[str, int]:
 __all__ = [
     "DecisionOptions",
     "build_decision_messages",
+    "build_structured_decision_messages",
     "decision_schema",
     "normalize_decision_usage",
+    "structured_decision_schema",
     "parse_decision_answers",
     "parse_json_text",
 ]

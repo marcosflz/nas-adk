@@ -58,12 +58,33 @@ class LlmResponse(BaseModel):
         ]
 
 
+class ModelCapabilities(BaseModel):
+    """Capacidades declaradas por un proveedor; ``None`` en la clase = no declaradas."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    generation: bool = True
+    tool_calling: Literal["native", "emulated", "none"] = "none"
+    structured_output: Literal["native", "emulated", "none"] = "none"
+    decisions: Literal["native_probabilistic", "structured", "none"] = "none"
+    text_streaming: bool = False
+    tool_argument_streaming: bool = False
+    usage: Literal["reported", "partial", "none"] = "none"
+    input_modalities: tuple[str, ...] = ("text",)
+    personal_use_only: bool = False
+
+
 class BaseLlm(BaseModel, abc.ABC):
     """Contrato async compartido por modelos y adaptadores de prueba."""
 
     model: str = ""
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     supports_streaming: ClassVar[bool] = False
+    capabilities: ClassVar[ModelCapabilities | None] = None
+
+    def get_capabilities(self) -> ModelCapabilities | None:
+        """Capacidades declaradas por el proveedor; ``None`` si no las declara."""
+        return type(self).capabilities
 
     async def aclose(self) -> None:
         """Libera recursos propios; las implementaciones sin recursos no hacen nada."""

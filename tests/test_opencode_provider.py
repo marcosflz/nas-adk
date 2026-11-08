@@ -191,3 +191,26 @@ async def test_opencode_retries_transient_errors() -> None:
             LlmRequest(model="demo", messages=[{"role": "user", "content": "hi"}])
         )
     assert calls == 3 and response.content == "ok"
+
+
+async def test_opencode_zen_base_uses_zen_chat_path() -> None:
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json=chat_response())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        model = ModelRouter(
+            provider="opencode",
+            model="beam-free",
+            base_url="https://opencode.example/zen/v1",
+            api_key="oc_sk_test",
+            api="chat_completions",
+            http_client=client,
+        )
+        await model.generate_content_async(
+            LlmRequest(model="beam-free", messages=[{"role": "user", "content": "hola"}])
+        )
+
+    assert seen == ["https://opencode.example/zen/v1/chat/completions"]

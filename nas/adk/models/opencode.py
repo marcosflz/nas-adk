@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from pydantic import Field, PrivateAttr, field_validator
@@ -62,6 +63,18 @@ class OpenCodeLlm(OpenAICompatibleLlm):
     responses_path: ClassVar[str] = "/openai/v1/responses"
 
     _session_id: str = PrivateAttr(default_factory=lambda: str(uuid4()))
+
+    def _url(self, api: Literal["chat_completions", "responses"]) -> str:
+        # Zen (modelos gratuitos, sin suscripción Go) expone /zen/v1/chat/completions,
+        # mientras que Go usa /openai/v1/... Con base ".../zen" o ".../zen/v1" usamos
+        # la ruta de Zen; el resto sigue igual.
+        base = self.base_url.rstrip("/")
+        if "/zen" in urlparse(base).path:
+            if base.endswith("/v1"):
+                base = base[: -len("/v1")]
+            path = "/v1/chat/completions" if api == "chat_completions" else "/v1/responses"
+            return f"{base}{path}"
+        return super()._url(api)
 
     @field_validator("api", mode="before")
     @classmethod

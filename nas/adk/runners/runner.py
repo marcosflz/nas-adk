@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from nas.adk.agents.context import Context
 from nas.adk.core.callbacks import CallbackManager
+from nas.adk.core.interrupts import ResumeEntry, ToolDecision, ToolInterrupt
 from nas.adk.core.events.event import Event
 from nas.adk.memory.extractor import MemoryExtractor
 from nas.adk.memory.models import Memory, MemoryConflictError, MemoryPolicy, MemoryRunState
@@ -43,6 +44,13 @@ class _Budget:
     calls: int = 0
     usage: dict[str, int] = field(default_factory=dict)
     timings: dict[str, float] = field(default_factory=dict)
+    max_tokens: int | None = None
+
+    def total_tokens(self) -> int:
+        total = self.usage.get("total_tokens")
+        if isinstance(total, int):
+            return total
+        return self.usage.get("input_tokens", 0) + self.usage.get("output_tokens", 0)
 
     async def wait(self, operation: Awaitable[T], metric: str | None = None) -> T:
         started = time.monotonic()
@@ -57,7 +65,23 @@ class _Budget:
     def consume(self) -> None:
         if self.calls >= self.max_calls:
             raise BudgetExceeded("Global model-call budget exhausted")
+        if self.max_tokens is not None and self.total_tokens() >= self.max_tokens:
+            raise BudgetExceeded("Token budget exhausted")
         self.calls += 1
+
+
+class _Interrupted(Exception):
+    """El run se detiene a la espera de una persona (ver ``ToolInterrupt``)."""
+
+    def __init__(self, interrupts: list[dict[str, Any]]) -> None:
+        super().__init__("run interrupted")
+        self.interrupts = interrupts
+
+
+@dataclass
+class _PendingCall:
+    call: dict[str, Any]
+    interrupt: ToolInterrupt
 
 
 class Runner:
@@ -77,6 +101,7 @@ class Runner:
         max_depth: int = 4,
         timeout: float = 120,
         max_tool_concurrency: int = 4,
+        max_total_tokens: int | None = None,
         memory_service: Any = None,
         artifact_service: Any = None,
         memory_policy: MemoryPolicy | None = None,
@@ -94,6 +119,7 @@ class Runner:
             or timeout <= 0
             or max_depth < 0
             or max_context_messages < 0
+            or (max_total_tokens is not None and max_total_tokens <= 0)
         ):
             raise ValueError("Runner limits must be positive (depth/messages may be zero)")
         self._app_name, self._agent = app_name, agent
@@ -113,6 +139,7 @@ class Runner:
             max_depth,
         )
         self._timeout, self._max_tool_concurrency = timeout, max_tool_concurrency
+        self._max_total_tokens = max_total_tokens
         self._memory, self._artifacts = memory_service, artifact_service
         if memory_policy is not None and not isinstance(memory_service, SQLiteMemoryService):
             raise ValueError("MemoryPolicy requires SQLiteMemoryService")
@@ -311,8 +338,31 @@ class Runner:
             )
         return message
 
-    def _build_messages(self, events: list[Event], user_message: str) -> list[dict[str, Any]]:
-        failed = {e.invocation_id for e in events if e.type == "status" and e.status != "completed"}
+    @staticmethod
+    def _failed_invocations(events: list[Event]) -> set[str]:
+        # «interrupted» es una pausa a la espera de una persona, no un fallo.
+        return {
+            e.invocation_id
+            for e in events
+            if e.type == "status" and e.status not in ("completed", "interrupted")
+        }
+
+    @classmethod
+    def _pending_calls(cls, events: list[Event]) -> list[dict[str, Any]]:
+        """Llamadas del último mensaje del asistente que aún no tienen resultado."""
+        failed = cls._failed_invocations(events)
+        visible = [
+            e for e in events
+            if e.type == "message" and not e.parent_invocation_id and e.invocation_id not in failed
+        ]
+        for index in range(len(visible) - 1, -1, -1):
+            if visible[index].role == "assistant" and visible[index].tool_calls:
+                answered = {e.tool_call_id for e in visible[index + 1:] if e.role == "tool"}
+                return [c for c in visible[index].tool_calls if c["id"] not in answered]
+        return []
+
+    def _build_messages(self, events: list[Event], user_message: str | None) -> list[dict[str, Any]]:
+        failed = self._failed_invocations(events)
         messages = (
             [{"role": "system", "content": self._agent.instruction}]
             if getattr(self._agent, "instruction", "")
@@ -323,7 +373,8 @@ class Runner:
             for e in events
             if e.type == "message" and not e.parent_invocation_id and e.invocation_id not in failed
         )
-        messages.append({"role": "user", "content": user_message})
+        if user_message is not None:
+            messages.append({"role": "user", "content": user_message})
         return messages
 
     def _truncate_messages(
@@ -379,6 +430,8 @@ class Runner:
         invocation: str,
         parent: str = "",
         depth: int = 0,
+        resume_calls: list[dict[str, Any]] | None = None,
+        resume_map: dict[str, ResumeEntry] | None = None,
     ) -> AsyncGenerator[Event, None]:
         if depth > self._max_depth:
             raise BudgetExceeded("Sub-agent depth budget exhausted")
@@ -421,6 +474,144 @@ class Runner:
             return result
 
         ctx.agent_runner = run_child
+        interrupts: list[dict[str, Any]] = []
+
+        async def run_tools(calls: list[dict[str, Any]]) -> AsyncGenerator[Event, None]:
+            async def execute_tool(call: dict[str, Any]) -> Event | _PendingCall:
+                name = call["function"]["name"]
+                entry = resume_map.get(call["id"]) if resume_map else None
+                started_tool = time.monotonic()
+                try:
+                    if entry is not None and entry.status == "resolved":
+                        result: Any = entry.payload
+                    elif entry is not None and entry.status == "denied":
+                        raise PermissionError(entry.reason or "denied by the user")
+                    else:
+                        raw = call["function"].get("arguments", "{}")
+                        args = json.loads(raw) if isinstance(raw, str) else raw
+                        if not isinstance(args, dict):
+                            raise ValueError("Tool arguments must be a JSON object")
+                        tool = next((tool for tool in tools if tool.name == name), None)
+                        if tool is None:
+                            raise ValueError(f"Tool {name} not found")
+                        if entry is None:  # una llamada aprobada no vuelve a consultar la política
+                            decisions = await budget.wait(
+                                self._callbacks.run(
+                                    "before_tool_call",
+                                    tool_name=name,
+                                    args=args,
+                                    tool_call_id=call["id"],
+                                    ctx=ctx,
+                                    agent_name=agent_name,
+                                ),
+                                "callback_seconds",
+                            )
+                            verdicts = [d for d in decisions if isinstance(d, ToolDecision)]
+                            denied = next((d for d in verdicts if d.action == "deny"), None)
+                            if denied is not None:
+                                raise PermissionError(denied.reason or "denied by policy")
+                            asked = next((d for d in verdicts if d.action == "interrupt"), None)
+                            if asked is not None:
+                                raise ToolInterrupt(asked.reason, asked.payload)
+                        if isinstance(tool, SubAgentTool):
+                            tool.validate_arguments(args)
+                            child_session = ctx.session.model_copy(
+                                update={"state": copy.deepcopy(ctx.state), "events": []}
+                            )
+                            child_ctx = ctx.for_child(
+                                child_session, allow_write=bool(
+                                    self._memory_policy and self._memory_policy.delegate_write
+                                ),
+                            )
+                            result = await run_child(tool.sub_agent, args, child_ctx)
+                        else:
+                            result = await budget.wait(
+                                tool.run_with_context(ctx, **args), "tool_seconds"
+                            )
+                    text = (
+                        result
+                        if isinstance(result, str)
+                        else json.dumps(result, ensure_ascii=False, default=str)
+                    )
+                except BudgetExceeded:
+                    raise
+                except ToolInterrupt as interrupt:
+                    if not parent:
+                        return _PendingCall(call, interrupt)
+                    await budget.wait(self._notify_error(interrupt))
+                    text = json.dumps(
+                        {"error": "interrupts are not supported inside sub-agents"},
+                        ensure_ascii=False,
+                    )
+                except Exception as error:
+                    await budget.wait(self._notify_error(error))
+                    text = json.dumps({"error": str(error)}, ensure_ascii=False)
+                await budget.wait(
+                    self._callbacks.run(
+                        "after_tool_call", tool_name=name, result=text, tool_call_id=call["id"]
+                    ),
+                    "callback_seconds",
+                )
+                return Event(
+                    author=name,
+                    content=text,
+                    role="tool",
+                    tool_call_id=call["id"],
+                    invocation_id=invocation,
+                    parent_invocation_id=parent,
+                    metrics={"tool_seconds": time.monotonic() - started_tool},
+                )
+
+            pending = list(calls)
+            while pending:
+                call = pending.pop(0)
+                tool = next((tool for tool in tools if tool.name == call["function"]["name"]), None)
+                group = [call]
+                if tool is not None and tool.parallel_safe and not isinstance(tool, SubAgentTool):
+                    while pending and len(group) < self._max_tool_concurrency:
+                        following = next(
+                            (t for t in tools if t.name == pending[0]["function"]["name"]), None
+                        )
+                        if (
+                            following is None
+                            or not following.parallel_safe
+                            or isinstance(following, SubAgentTool)
+                        ):
+                            break
+                        group.append(pending.pop(0))
+                tasks = [asyncio.create_task(execute_tool(call)) for call in group]
+                try:
+                    results = await asyncio.gather(*tasks)
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                for item in results:
+                    if isinstance(item, _PendingCall):
+                        interrupts.append(
+                            {
+                                "id": item.call["id"],
+                                "toolCallId": item.call["id"],
+                                "toolName": item.call["function"]["name"],
+                                "args": item.call["function"].get("arguments", "{}"),
+                                "reason": item.interrupt.reason,
+                                "payload": item.interrupt.payload,
+                            }
+                        )
+                        continue
+                    messages.append(self._model_message(item))
+                    yield await self._record(ctx.session.id, item, budget)
+                if interrupts:
+                    # Las llamadas que no llegaron a ejecutarse quedan sin resultado y
+                    # se retoman con ``resume=`` junto con las que esperan respuesta.
+                    return
+
+        if resume_calls:
+            async for tool_event in run_tools(resume_calls):
+                yield tool_event
+            if interrupts:
+                raise _Interrupted(list(interrupts))
         for _ in range(self._max_turns):
             tool_defs = [tool.to_llm_tool() for tool in tools]
             if self._memory_policy and ctx.memory_state and ctx.memory_state.capture_suppressed:
@@ -530,97 +721,26 @@ class Runner:
             if completed:
                 return
 
-            async def execute_tool(call: dict[str, Any]) -> Event:
-                name = call["function"]["name"]
-                started_tool = time.monotonic()
-                try:
-                    raw = call["function"].get("arguments", "{}")
-                    args = json.loads(raw) if isinstance(raw, str) else raw
-                    if not isinstance(args, dict):
-                        raise ValueError("Tool arguments must be a JSON object")
-                    tool = next((tool for tool in tools if tool.name == name), None)
-                    if tool is None:
-                        raise ValueError(f"Tool {name} not found")
-                    await budget.wait(
-                        self._callbacks.run("before_tool_call", tool_name=name, args=args),
-                        "callback_seconds",
-                    )
-                    if isinstance(tool, SubAgentTool):
-                        tool.validate_arguments(args)
-                        child_session = ctx.session.model_copy(
-                            update={"state": copy.deepcopy(ctx.state), "events": []}
-                        )
-                        child_ctx = ctx.for_child(
-                            child_session, allow_write=bool(
-                                self._memory_policy and self._memory_policy.delegate_write
-                            ),
-                        )
-                        result = await run_child(tool.sub_agent, args, child_ctx)
-                    else:
-                        result = await budget.wait(
-                            tool.run_with_context(ctx, **args), "tool_seconds"
-                        )
-                    text = (
-                        result
-                        if isinstance(result, str)
-                        else json.dumps(result, ensure_ascii=False, default=str)
-                    )
-                except BudgetExceeded:
-                    raise
-                except Exception as error:
-                    await budget.wait(self._notify_error(error))
-                    text = json.dumps({"error": str(error)}, ensure_ascii=False)
-                await budget.wait(
-                    self._callbacks.run("after_tool_call", tool_name=name, result=text),
-                    "callback_seconds",
-                )
-                return Event(
-                    author=name,
-                    content=text,
-                    role="tool",
-                    tool_call_id=call["id"],
-                    invocation_id=invocation,
-                    parent_invocation_id=parent,
-                    metrics={"tool_seconds": time.monotonic() - started_tool},
-                )
-
-            pending = list(calls)
-            while pending:
-                call = pending.pop(0)
-                tool = next((tool for tool in tools if tool.name == call["function"]["name"]), None)
-                group = [call]
-                if tool is not None and tool.parallel_safe and not isinstance(tool, SubAgentTool):
-                    while pending and len(group) < self._max_tool_concurrency:
-                        following = next(
-                            (t for t in tools if t.name == pending[0]["function"]["name"]), None
-                        )
-                        if (
-                            following is None
-                            or not following.parallel_safe
-                            or isinstance(following, SubAgentTool)
-                        ):
-                            break
-                        group.append(pending.pop(0))
-                tasks = [asyncio.create_task(execute_tool(call)) for call in group]
-                try:
-                    results = await asyncio.gather(*tasks)
-                finally:
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                for event in results:
-                    messages.append(self._model_message(event))
-                    yield await self._record(ctx.session.id, event, budget)
+            async for tool_event in run_tools(calls):
+                yield tool_event
+            if interrupts:
+                raise _Interrupted(list(interrupts))
         raise BudgetExceeded("Agent turn budget exhausted")
 
     async def run_async(
         self,
         user_id: str,
         session_id: str,
-        message: str,
+        message: str | None = None,
         stream: bool = False,
+        resume: list[ResumeEntry] | None = None,
     ) -> AsyncGenerator[Event, None]:
+        """Ejecuta un turno nuevo (``message``) o reanuda uno interrumpido (``resume``).
+
+        Un run que termina con ``status="interrupted"`` deja llamadas a tools sin
+        resultado; ``resume`` aporta la respuesta de la persona a cada una (ver
+        ``ResumeEntry``) y el bucle continúa donde se quedó, sin mensaje nuevo.
+        """
         if self._agent is None:
             raise RuntimeError("Runner has no agent configured")
         session = await self._session_call(
@@ -628,30 +748,73 @@ class Runner:
         )
         self._session_service.acquire_session(session.id)
         started = time.monotonic()
-        budget = _Budget(self._max_model_calls, started + self._timeout)
+        budget = _Budget(
+            self._max_model_calls, started + self._timeout, max_tokens=self._max_total_tokens
+        )
         invocation = str(uuid4())
         completed = False
         ctx: Context | None = None
         try:
-            message = self._agent.validate_input(message)
-            messages = self._build_messages(list(session.events), message)
-            user_event = Event(author="user", role="user", content=message, invocation_id=invocation)
-            yield await self._record(
-                session.id,
-                user_event,
-                budget,
-            )
-            ctx = Context(
-                session, self._memory, self._artifacts, memory_policy=self._memory_policy,
-                memory_state=MemoryRunState(source=user_event),
-            )
-            messages = await self._load_memory(ctx, message, budget) + messages
+            resume_calls: list[dict[str, Any]] | None = None
+            resume_map: dict[str, ResumeEntry] | None = None
+            if resume:
+                if message is not None:
+                    raise ValueError("Pass either message or resume, not both")
+                pending = self._pending_calls(list(session.events))
+                if not pending:
+                    raise ValueError("Session has no pending tool calls to resume")
+                unknown = {entry.call_id for entry in resume} - {c["id"] for c in pending}
+                if unknown:
+                    raise ValueError(f"Unknown tool call ids: {sorted(unknown)}")
+                messages = self._build_messages(list(session.events), None)
+                ctx = Context(
+                    session, self._memory, self._artifacts, memory_policy=self._memory_policy,
+                )
+                resume_calls = pending
+                resume_map = {entry.call_id: entry for entry in resume}
+            else:
+                if message is None:
+                    raise ValueError("message is required unless resuming")
+                message = self._agent.validate_input(message)
+                messages = self._build_messages(list(session.events), message)
+                user_event = Event(
+                    author="user", role="user", content=message, invocation_id=invocation
+                )
+                yield await self._record(session.id, user_event, budget)
+                ctx = Context(
+                    session, self._memory, self._artifacts, memory_policy=self._memory_policy,
+                    memory_state=MemoryRunState(source=user_event),
+                )
+                messages = await self._load_memory(ctx, message, budget) + messages
             async with aclosing(
-                self._execute(self._agent, messages, ctx, budget, stream, invocation)
+                self._execute(
+                    self._agent, messages, ctx, budget, stream, invocation,
+                    resume_calls=resume_calls, resume_map=resume_map,
+                )
             ) as execution:
                 async for event in execution:
                     completed = event.final
                     yield event
+        except _Interrupted as interrupted:
+            await self._session_call("save_state", session)
+            completed = True
+            yield await self._record(
+                session.id,
+                Event(
+                    author="runner",
+                    type="status",
+                    status="interrupted",
+                    final=True,
+                    invocation_id=invocation,
+                    metrics={
+                        "interrupts": interrupted.interrupts,
+                        "total_seconds": time.monotonic() - started,
+                        "model_calls": budget.calls,
+                        "total_usage": dict(budget.usage),
+                    },
+                ),
+                budget,
+            )
         except (asyncio.CancelledError, GeneratorExit):
             if not completed:
                 await self._record(
