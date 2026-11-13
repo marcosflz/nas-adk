@@ -168,7 +168,7 @@ class Runner:
         return getattr(self._session_service, method)(*args)
 
     async def _record(self, session_id: str, event: Event, budget: _Budget | None = None) -> Event:
-        if event.type != "stream":
+        if event.type not in ("stream", "reasoning"):
             if event.final and budget is not None:
                 event.metrics["timings"] = dict(budget.timings)
             started = time.monotonic()
@@ -651,8 +651,8 @@ class Runner:
                             Event(
                                 author=agent_name,
                                 role="assistant",
-                                content=chunk.content,
-                                type="stream",
+                                content=chunk.reasoning if chunk.reasoning else chunk.content,
+                                type="reasoning" if chunk.reasoning else "stream",
                                 invocation_id=invocation,
                                 parent_invocation_id=parent,
                             ),

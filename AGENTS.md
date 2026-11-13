@@ -24,6 +24,7 @@ nas/adk/
 ├── orchestration/   → Workflow (grafos), Planner (ReAct)
 ├── protocols/       → A2A, MCP (Model Context Protocol)
 ├── services/        → Artifacts, CodeExecutor, EvalRunner
+├── ui/              → Intelligent UI: present_openui/prompt_openui/suggest_followups, TextCallRecovery, reglas de prompt
 └── cli/             → Chat Rich; comandos click (run, create, a2a, mcp, eval)
 ```
 

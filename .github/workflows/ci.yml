@@ -33,6 +33,26 @@ jobs:
       - name: Test
         run: uv run pytest tests/ -q
 
+  commits:
+    # Los mensajes deben seguir Conventional Commits (feat:, fix:, feat!:…)
+    # para que release.yml pueda calcular la versión con commitizen.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Install commitizen
+        run: uv sync --extra dev --inexact
+      - name: Check commit messages
+        run: >-
+          uv run cz check
+          --rev-range ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
   build:
     runs-on: ubuntu-latest
     needs: test

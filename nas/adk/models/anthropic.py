@@ -106,6 +106,25 @@ def _is_error_result(text: str) -> bool:
     return isinstance(data, dict) and set(data) == {"error"}
 
 
+def _tool_result_content(text: str, images: Any) -> str | list[dict[str, Any]]:
+    """Un resultado con ``images`` ([{media_type, data}]) lleva bloques de imagen en base64."""
+    if not images:
+        return text
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+    for image in images:
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image["media_type"],
+                    "data": image["data"],
+                },
+            }
+        )
+    return blocks
+
+
 def to_anthropic_messages(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -142,7 +161,7 @@ def to_anthropic_messages(
             block: dict[str, Any] = {
                 "type": "tool_result",
                 "tool_use_id": call_id,
-                "content": text,
+                "content": _tool_result_content(text, message.get("images")),
             }
             if _is_error_result(text):
                 block["is_error"] = True
@@ -261,6 +280,17 @@ def _output_config(request: LlmRequest) -> dict[str, Any]:
     return config
 
 
+# En estos modelos el razonamiento ya está activo por defecto, pero su texto llega vacío
+# salvo que se pida resumido. En los anteriores activarlo cambiaría coste y comportamiento.
+_THINKS_BY_DEFAULT = re.compile(r"^claude-[a-z]+-[5-9](?:[-.]|$)")
+
+
+def summarized_thinking(model: str, request: LlmRequest) -> dict[str, Any] | None:
+    if not request.reasoning_summary or not _THINKS_BY_DEFAULT.match(model):
+        return None
+    return {"type": "adaptive", "display": "summarized"}
+
+
 # ------------------------------------------------------------------------ respuesta
 
 
@@ -358,6 +388,7 @@ class AnthropicLlm(BaseLlm):
         text_streaming=True,
         tool_argument_streaming=False,
         usage="reported",
+        input_modalities=("text", "image"),
     )
 
     _client: Any = PrivateAttr(default=None)
@@ -405,6 +436,9 @@ class AnthropicLlm(BaseLlm):
         output = _output_config(request)
         if output:
             params["output_config"] = output
+        thinking = summarized_thinking(model, request)
+        if thinking:
+            params["thinking"] = thinking
         ignored: list[str] = []
         if request.temperature is not None:
             ignored.append("temperature")
@@ -462,6 +496,9 @@ class AnthropicLlm(BaseLlm):
                 async for event in stream:
                     if event.type == "text" and event.text:
                         yield LlmResponse(content=event.text, type="delta")
+                    elif event.type == "content_block_delta" and event.delta.type == "thinking_delta":
+                        if event.delta.thinking:
+                            yield LlmResponse(reasoning=event.delta.thinking, type="delta")
                 message = await stream.get_final_message()
             yield parse_message(message, ignored=ignored, model=params["model"])
         except (sdk.APIError, sdk.AnthropicError) as error:

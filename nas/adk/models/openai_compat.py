@@ -79,11 +79,32 @@ def build_chat_body(request: LlmRequest, *, model: str | None = None) -> dict[st
     )
     if model:
         body["model"] = model
-    body["messages"] = [
-        {key: value for key, value in message.items() if key != "_response_items"}
-        for message in request.messages
-    ]
+    body["messages"] = _chat_messages(request.messages)
     return body
+
+
+def _data_url(image: Mapping[str, Any]) -> str:
+    return f"data:{image['media_type']};base64,{image['data']}"
+
+
+def _chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """El rol ``tool`` solo admite texto: las imágenes van en un mensaje de usuario justo detrás."""
+    out: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if pending:
+            out.append({"role": "user", "content": list(pending)})
+            pending.clear()
+
+    for message in messages:
+        if message.get("role") != "tool":
+            flush()
+        out.append({k: v for k, v in message.items() if k not in ("_response_items", "images")})
+        for image in message.get("images") or []:
+            pending.append({"type": "image_url", "image_url": {"url": _data_url(image)}})
+    flush()
+    return out
 
 
 def build_responses_body(request: LlmRequest, *, model: str | None = None) -> dict[str, Any]:
@@ -113,8 +134,17 @@ def build_responses_body(request: LlmRequest, *, model: str | None = None) -> di
 
 def responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if pending:
+            items.append({"role": "user", "content": list(pending)})
+            pending.clear()
+
     for message in messages:
         role = message["role"]
+        if role != "tool":
+            flush()
         if role == "assistant" and message.get("_response_items"):
             items.extend(
                 {key: value for key, value in item.items() if key != "status"}
@@ -128,6 +158,8 @@ def responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "output": message.get("content") or "",
                 }
             )
+            for image in message.get("images") or []:
+                pending.append({"type": "input_image", "image_url": _data_url(image)})
         elif role in {"user", "assistant", "system", "developer"}:
             if message.get("content") or role != "assistant":
                 items.append({"role": role, "content": message.get("content") or ""})
@@ -148,6 +180,7 @@ def responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
         else:
             raise ValueError(f"Unsupported Responses message role: {role}")
+    flush()
     return items
 
 
@@ -184,6 +217,10 @@ async def parse_chat_stream(
             continue
         choice = choices[0]
         delta = choice.get("delta") or {}
+        # Varios servidores compatibles publican el razonamiento en un campo aparte.
+        thought = delta.get("reasoning_content") or delta.get("reasoning")
+        if isinstance(thought, str) and thought:
+            yield LlmResponse(reasoning=thought, type="delta")
         text = delta.get("content") or ""
         if text:
             content += text
@@ -315,6 +352,9 @@ async def parse_responses_stream(
                         yield LlmResponse(content="\n\n", type="delta")
                     last_item = item
                 yield LlmResponse(content=event["delta"], type="delta")
+        elif kind == "response.reasoning_summary_text.delta":
+            if event.get("delta"):
+                yield LlmResponse(reasoning=event["delta"], type="delta")
         elif kind in {"response.completed", "response.incomplete", "response.failed"}:
             yield parse_responses_response(event["response"])
             return

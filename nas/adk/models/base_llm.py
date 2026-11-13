@@ -27,12 +27,16 @@ class LlmRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     response_format: dict[str, Any] | None = None
     reasoning_effort: str | None = None
+    # Pide al proveedor un resumen legible de su razonamiento, donde lo ofrezca sin coste añadido.
+    reasoning_summary: bool = False
 
 
 class LlmResponse(BaseModel):
     """Respuesta del modelo: texto generado + tool_calls."""
 
     content: str | None = None
+    # Solo en deltas: fragmento del razonamiento (o de su resumen) que publica el proveedor.
+    reasoning: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     finish_reason: str = "stop"
     type: Literal["delta", "response"] = "response"
