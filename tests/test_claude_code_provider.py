@@ -381,7 +381,11 @@ async def test_list_models_uses_the_control_protocol_without_inference() -> None
                         yield json.dumps(
                             {
                                 "type": "control_response",
-                                "response": {"subtype": "success", "request_id": request_id, "response": {"models": raw}},
+                                "response": {
+                                    "subtype": "success",
+                                    "request_id": request_id,
+                                    "response": {"models": raw, "account": account},
+                                },
                             }
                         ).encode() + b"\n"
 
@@ -390,6 +394,7 @@ async def test_list_models_uses_the_control_protocol_without_inference() -> None
                 return handle
             return await super().spawn(argv, env=env, cwd=cwd)
 
+    account: dict[str, Any] = {"email": "ana@example.com", "subscriptionType": "max"}
     t = ControlTransport()
     models = await llm(t, oauth_token="sk-ant-oat01-mine").list_models()
     assert [(m.id, m.label) for m in models] == [
@@ -450,3 +455,16 @@ def test_protocol_tells_the_model_how_to_use_tools() -> None:
     from nas.adk.models.claude_code import protocol
 
     assert "never call tools" in protocol.SYSTEM_PROMPT and "tool_calls" in protocol.SYSTEM_PROMPT
+
+
+
+async def test_setup_token_accounts_also_get_the_known_versions() -> None:
+    from nas.adk.models.claude_code.known_models import KNOWN_MODELS
+    from nas.adk.models.claude_code.llm import with_known_models
+    from nas.adk.models.catalog import ModelInfo
+
+    base = [ModelInfo(id="opus", label="Opus 5.5"), ModelInfo(id="claude-opus-4-8", label="Opus 4.8")]
+    merged = with_known_models(base)
+    assert [m.id for m in merged[:2]] == ["opus", "claude-opus-4-8"]
+    assert all(m.source == "known" for m in merged[2:])
+    assert len(merged) == 2 + len(KNOWN_MODELS) - 1  # sin duplicar el que ya anunciaba

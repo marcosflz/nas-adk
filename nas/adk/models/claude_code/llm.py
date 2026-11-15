@@ -21,6 +21,7 @@ from pydantic import Field, PrivateAttr, SecretStr
 from nas.adk.models.base_llm import BaseLlm, LlmRequest, LlmResponse, ModelCapabilities
 from nas.adk.models.catalog import ModelInfo
 from nas.adk.models.claude_code import isolation
+from nas.adk.models.claude_code.known_models import KNOWN_MODELS
 from nas.adk.models.claude_code import protocol as proto
 from nas.adk.models.claude_code.transport import (
     AsyncioProcessTransport,
@@ -187,7 +188,14 @@ class ClaudeCodeLlm(BaseLlm):
         if not response or response.get("subtype") != "success":
             detail = isolation.redact(str((response or {}).get("error") or handle.stderr_tail()))
             raise LlmProcessError(f"Claude Code did not return its model list: {detail}")
-        return parse_models((response.get("response") or {}).get("models"))
+        body = response.get("response") or {}
+        models = parse_models(body.get("models"))
+        account = body.get("account") or {}
+        if account.get("tokenSource") == "CLAUDE_CODE_OAUTH_TOKEN":
+            # Con un token de `setup-token` el CLI no conoce el plan y solo anuncia alias: se
+            # añaden las versiones conocidas de este CLI (la inferencia las acepta).
+            models = with_known_models(models)
+        return models
 
     # ------------------------------------------------------------------ ejecución
 
@@ -463,6 +471,17 @@ class ClaudeCodeLlm(BaseLlm):
 
 def isolation_arg_limit() -> int:
     return proto.MAX_SCHEMA_BYTES
+
+
+def with_known_models(models: list[ModelInfo]) -> list[ModelInfo]:
+    """Añade las versiones de :data:`KNOWN_MODELS` que falten, marcadas como ``known``."""
+    seen = {m.id for m in models}
+    extra = [
+        ModelInfo(id=model_id, label=label, description=description, source="known")
+        for model_id, label, description in KNOWN_MODELS
+        if model_id not in seen
+    ]
+    return [*models, *extra]
 
 
 def parse_models(raw: Any) -> list[ModelInfo]:

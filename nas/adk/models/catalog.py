@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -12,3 +14,6 @@ class ModelInfo(BaseModel):
     label: str
     description: str | None = None
     efforts: list[str] = Field(default_factory=list)
+    source: Literal["account", "known"] = "account"
+    """``account``: lo anuncia la cuenta autenticada. ``known``: está en el catálogo conocido del
+    proveedor, pero la cuenta no lo anunció (puede no estar en su plan)."""
