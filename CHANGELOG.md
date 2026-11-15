@@ -1,3 +1,9 @@
+## v0.5.0 (2026-11-15)
+
+### Feat
+
+- **skills**: portable SKILL.md runtime and versioned session checkpoints
+
 ## v0.4.0 (2026-11-15)
 
 ### Feat
