@@ -88,6 +88,28 @@ model = ModelRouter(provider="anthropic", model="<id de modelo>")  # ANTHROPIC_A
   thinking* pueden rechazar el historial editado (`LlmRequestError`): sube `max_context_tokens`.
 - `max_tokens` y `refusal` no son éxito: lanzan `LlmTruncatedError` / `LlmRefusalError`.
 
+#### `chatgpt` (plan de ChatGPT de cada persona)
+
+«Sign in with ChatGPT», la vía oficial de OpenAI para apps de terceros (en *preview*; OpenAI la
+plantea para apps open source y alojadas localmente). Cada persona inicia sesión con su cuenta y
+la app usa su token solo para sus propias peticiones.
+
+```python
+from nas.adk.models.chatgpt import ChatGptPlanLlm, oauth
+
+pending = oauth.start_login(host_id=HOST_ID, app_name="Mi app")  # HOST_ID = oauth.new_host_id(), uno por instalación
+# La persona abre pending.url, autoriza y copia la dirección final (http://127.0.0.1:1455/…).
+creds = await oauth.exchange_code(pasted_url, pending)          # guárdalas cifradas, por persona
+creds = await oauth.refresh(creds)                              # el token de refresco rota: guarda siempre el nuevo
+models = await oauth.list_models(creds.access_token)            # [{id, label}]
+llm = ChatGptPlanLlm(model=models[0]["id"], access_token=creds.access_token)
+```
+
+- Responses API con `store: false` y streaming; herramientas de función nativas (agrupadas en un
+  *namespace*). Los códigos de la ruta se tipan: límite de uso → `LlmQuotaError`, cuenta inválida →
+  `LlmAuthError`, no elegible → `LlmPermissionError`.
+- Serializa los refrescos de una misma cuenta: un token de refresco reutilizado invalida la sesión.
+
 #### `claude-code` (suscripción local)
 
 Requisitos: Claude Code instalado y autenticado **por ti** con tu suscripción
@@ -109,6 +131,9 @@ model = ModelRouter(provider="claude-code")  # CLAUDE_CODE_MODEL es opcional
   autorizar y devuelve su token (`sk-ant-oat01-…`, un año), y `close()` termina el proceso y
   borra el `HOME`. Solo se lanza desde una acción explícita del titular. NAS no reimplementa el
   OAuth de Anthropic. Guarda el token cifrado y asociado a esa persona; no lo compartas.
+
+  `ClaudeCodeLlm(...).list_models()` devuelve los modelos de la suscripción (`[ModelInfo]`) con el
+  protocolo de control oficial del CLI (`initialize`), sin inferencia.
 
   ```python
   async with SetupTokenSession() as login:

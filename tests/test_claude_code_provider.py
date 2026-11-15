@@ -350,3 +350,57 @@ async def test_oauth_token_overrides_environment(monkeypatch: pytest.MonkeyPatch
     t = FakeTransport([FakeHandle([INIT, final("ok")])])
     await llm(t).generate_content_async(req())
     assert t.main_calls[0]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-from-env"
+
+
+async def test_list_models_uses_the_control_protocol_without_inference() -> None:
+    from nas.adk.models.claude_code.llm import parse_models
+
+    raw = [
+        {"value": "default", "displayName": "Default (recommended)", "description": "Opus 5.5 · Best"},
+        {"value": "opus", "displayName": "Opus", "description": "Opus 5.5 · Best", "supportedEffortLevels": ["low", "max"]},
+        {"value": "opus", "displayName": "dup"},
+        {"value": "claude-haiku-4-5", "displayName": "Haiku 4.5", "description": "Fastest"},
+        {"bad": True},
+    ]
+
+    class ControlTransport(FakeTransport):
+        async def spawn(self, argv, *, env, cwd):  # type: ignore[no-untyped-def]
+            if "--input-format" in argv:
+                self.spawned.append({"argv": list(argv), "env": dict(env), "cwd": cwd})
+                request_id = "?"
+
+                class Handle(FakeHandle):
+                    async def write_stdin(self, data: bytes) -> None:
+                        nonlocal request_id
+                        self.stdin = data
+                        request_id = json.loads(data)["request_id"]
+
+                    async def stdout_lines(self):  # type: ignore[no-untyped-def]
+                        yield b"not json\n"
+                        yield json.dumps({"type": "system", "subtype": "hook_started"}).encode() + b"\n"
+                        yield json.dumps(
+                            {
+                                "type": "control_response",
+                                "response": {"subtype": "success", "request_id": request_id, "response": {"models": raw}},
+                            }
+                        ).encode() + b"\n"
+
+                handle = Handle()
+                self.main_handles.append(handle)
+                return handle
+            return await super().spawn(argv, env=env, cwd=cwd)
+
+    t = ControlTransport()
+    models = await llm(t, oauth_token="sk-ant-oat01-mine").list_models()
+    assert [(m.id, m.label) for m in models] == [
+        ("default", "Default (recommended)"),
+        ("opus", "Opus 5.5"),
+        ("claude-haiku-4-5", "Haiku 4.5"),
+    ]
+    assert models[1].efforts == ["low", "max"] and models[1].description == "Best"
+    call = next(s for s in t.spawned if "--input-format" in s["argv"])
+    assert call["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-mine"
+    assert "--safe-mode" in call["argv"] and "-p" in call["argv"]
+    sent = json.loads(t.main_handles[0].stdin)
+    assert sent["type"] == "control_request" and sent["request"] == {"subtype": "initialize"}
+    assert parse_models("nope") == []

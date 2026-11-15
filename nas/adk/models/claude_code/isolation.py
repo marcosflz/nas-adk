@@ -203,3 +203,29 @@ def build_argv(
     if effort:
         argv += ["--effort", effort]
     return argv
+
+
+def build_control_argv(executable: str) -> list[str]:
+    """Sesión aislada solo para el protocolo de control (p. ej. listar modelos). Sin inferencia."""
+    return [
+        executable,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--disallowedTools",
+        "mcp__*",
+        "--strict-mcp-config",
+        "--restricted",
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+    ]

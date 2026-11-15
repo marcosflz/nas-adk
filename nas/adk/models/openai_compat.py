@@ -259,7 +259,9 @@ def parse_responses_response(data: Mapping[str, Any]) -> LlmResponse:
     if data.get("error") or data.get("status") in {"failed", "cancelled"}:
         error = data.get("error") or {}
         raise LlmResponseError(
-            str(error.get("message") or f"Responses request {data.get('status')}")
+            str(error.get("message") or f"Responses request {data.get('status')}"),
+            # El cuerpo conserva `error.code` para que cada proveedor lo pueda tipar.
+            body=json.dumps({"error": error}) if isinstance(error, dict) and error else None,
         )
     output = data.get("output")
     if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):

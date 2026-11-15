@@ -19,6 +19,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import Field, PrivateAttr, SecretStr
 
 from nas.adk.models.base_llm import BaseLlm, LlmRequest, LlmResponse, ModelCapabilities
+from nas.adk.models.catalog import ModelInfo
 from nas.adk.models.claude_code import isolation
 from nas.adk.models.claude_code import protocol as proto
 from nas.adk.models.claude_code.transport import (
@@ -140,6 +141,50 @@ class ClaudeCodeLlm(BaseLlm):
                 isolation.check_auth_status(out, code)
                 self._auth_ok_until = time.monotonic() + self.auth_check_ttl
         return path, self._ready
+
+    # ------------------------------------------------------------------ catálogo
+
+    async def list_models(self, timeout: float = 60.0) -> list[ModelInfo]:
+        """Modelos que la suscripción autenticada puede usar, según el propio CLI.
+
+        Usa el protocolo de control oficial (``initialize`` sobre ``--input-format stream-json``,
+        lo mismo que ``supportedModels()`` del Agent SDK). No envía ningún mensaje de usuario, así
+        que no hace inferencia ni gasta cuota.
+        """
+        env = self._child_env()
+        path, _ = await self._prepare(env)
+        argv = isolation.build_control_argv(path)
+        request_id = f"nas-models-{time.monotonic_ns()}"
+        request = {"type": "control_request", "request_id": request_id, "request": {"subtype": "initialize"}}
+        with tempfile.TemporaryDirectory(prefix="nas-cc-") as cwd:
+            handle = await self._transport().spawn(argv, env=env, cwd=cwd)
+            try:
+                async def _read() -> dict[str, Any] | None:
+                    # El CLI responde a `initialize` aunque stdin se cierre justo después.
+                    await handle.write_stdin((json.dumps(request) + "\n").encode())
+                    async for raw in handle.stdout_lines():
+                        try:
+                            event = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if (
+                            isinstance(event, dict)
+                            and event.get("type") == "control_response"
+                            and (event.get("response") or {}).get("request_id") == request_id
+                        ):
+                            return event["response"]  # type: ignore[no-any-return]
+                    return None
+
+                try:
+                    response = await asyncio.wait_for(_read(), timeout)
+                except asyncio.TimeoutError as error:
+                    raise LlmTimeoutError("Claude Code did not list its models in time", cause=error) from error
+            finally:
+                await handle.terminate()
+        if not response or response.get("subtype") != "success":
+            detail = isolation.redact(str((response or {}).get("error") or handle.stderr_tail()))
+            raise LlmProcessError(f"Claude Code did not return its model list: {detail}")
+        return parse_models((response.get("response") or {}).get("models"))
 
     # ------------------------------------------------------------------ ejecución
 
@@ -353,3 +398,32 @@ class ClaudeCodeLlm(BaseLlm):
 
 def isolation_arg_limit() -> int:
     return proto.MAX_SCHEMA_BYTES
+
+
+def parse_models(raw: Any) -> list[ModelInfo]:
+    """Convierte ``models`` de la respuesta a ``initialize`` en ``ModelInfo`` (sin duplicados)."""
+    models: list[ModelInfo] = []
+    seen: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("value"), str):
+            continue
+        model_id = item["value"]
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        efforts = item.get("supportedEffortLevels")
+        label = str(item.get("displayName") or model_id)
+        description = str(item["description"]) if item.get("description") else None
+        # «Opus 5.5 · Best for…»: el nombre con versión es más útil que «Opus» a secas.
+        if description and " · " in description and model_id != "default":
+            versioned, _, rest = description.partition(" · ")
+            label, description = versioned.strip() or label, rest.strip() or None
+        models.append(
+            ModelInfo(
+                id=model_id,
+                label=label,
+                description=description,
+                efforts=[str(e) for e in efforts] if isinstance(efforts, list) else [],
+            )
+        )
+    return models
