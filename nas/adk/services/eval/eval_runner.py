@@ -4,10 +4,11 @@ import json
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator, Callable
 from uuid import uuid4
 
 from nas.adk import Agent, Runner
+from nas.adk.core.events.event import Event
 from nas.adk.sessions.in_memory_session_service import (
     InMemorySessionService,
 )
@@ -71,15 +72,28 @@ class EvalRunner:
         self,
         agent: Agent,
         evaluator_agent: Agent | None = None,
+        execution: Callable[[EvalCase], AsyncIterator[Event]] | None = None,
     ) -> None:
         self._agent = agent
         self._evaluator = evaluator_agent
+        self._execution = execution
 
     def _score_exact(self, output: str, expected: str) -> float:
         return 1.0 if output.strip() == expected.strip() else 0.0
 
     def _score_substring(self, output: str, expected: str) -> float:
         return 1.0 if expected.lower() in output.lower() else 0.0
+
+    @staticmethod
+    def assess_observation(output: str, expected: str = "", status: str = "completed") -> dict[str, Any]:
+        """Assess a host-executed case, preserving pending and failed execution states."""
+        if status in {"running", "awaiting_input", "interrupted"}:
+            return {"passed": False, "score": 0.0, "status": status, "details": "pending"}
+        if status != "completed":
+            return {"passed": False, "score": 0.0, "status": status, "details": "failed"}
+        passed = not expected or expected.lower() in output.lower()
+        return {"passed": passed, "score": 1.0 if passed else 0.0, "status": status,
+                "details": "completed" if not expected else "contains_expected" if passed else "missing_expected"}
 
     async def _score_llm(self, case: EvalCase, output: str) -> tuple[float, str]:
         if self._evaluator is None:
@@ -132,11 +146,12 @@ class EvalRunner:
                     session_service=svc,
                 )
                 final_text = ""
-                async for event in runner.run_async(
+                events = self._execution(case) if self._execution is not None else runner.run_async(
                     user_id="eval_user",
                     session_id=str(uuid4()),
                     message=case.input,
-                ):
+                )
+                async for event in events:
                     if event.final:
                         terminal = event
                         final_text = event.content or ""

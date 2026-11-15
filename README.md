@@ -573,3 +573,7 @@ desde tags.
   `provider="typesafe"`/`provider="openrouter"` (decisión).
 - `edhm-sdk` ya no es dependencia.
 - `azure-pipelines.yml` fue reemplazado por GitHub Actions.
+
+## Agent Skills
+
+Soporte portable de skills en el harness: importación, carga progresiva, activación, checkpoints y creador reutilizable mediante adaptadores del host. Consulta [Agent Skills](docs/skills.md).

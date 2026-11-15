@@ -19,6 +19,7 @@ from nas.adk.memory.models import Memory, MemoryConflictError, MemoryPolicy, Mem
 from nas.adk.memory.sqlite_memory_service import SQLiteMemoryService
 from nas.adk.models.base_llm import LlmResponse
 from nas.adk.sessions.in_memory_session_service import InMemorySessionService
+from nas.adk.skills.runtime import CONTEXT_NAMES, STATE_KEY, SkillRuntime
 from nas.adk.tools.base_tool import BaseTool
 from nas.adk.tools.sub_agent_tool import SubAgentTool
 
@@ -106,6 +107,7 @@ class Runner:
         artifact_service: Any = None,
         memory_policy: MemoryPolicy | None = None,
         memory_extractor: MemoryExtractor | None = None,
+        skills: SkillRuntime | None = None,
     ) -> None:
         if (
             min(
@@ -152,6 +154,7 @@ class Runner:
         ):
             raise ValueError("Automatic capture requires an explicit MemoryExtractor")
         self._memory_policy, self._memory_extractor = memory_policy, memory_extractor
+        self._skills = skills
 
     @property
     def app_name(self) -> str:
@@ -383,18 +386,20 @@ class Runner:
         tool_defs: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         memory_messages = [m for m in messages if m.get("name") in _MEMORY_NAMES]
+        skill_messages = [m for m in messages if m.get("name") in CONTEXT_NAMES]
         instructions = [
             m for m in messages if m["role"] == "system" and m.get("name") not in _MEMORY_NAMES
         ]
         turns: list[list[dict[str, Any]]] = []
         for message in messages:
-            if message["role"] == "system" or message.get("name") in _MEMORY_NAMES:
+            if (message["role"] == "system" or message.get("name") in _MEMORY_NAMES
+                    or message.get("name") in CONTEXT_NAMES):
                 continue
             if message["role"] == "user" or not turns:
                 turns.append([])
             turns[-1].append(message)
         while True:
-            kept = instructions + memory_messages + [m for turn in turns for m in turn]
+            kept = instructions + memory_messages + skill_messages + [m for turn in turns for m in turn]
             # ponytail: estimación de 4 caracteres/token; usar tokenizer si hace falta un límite exacto.
             over = (
                 len(json.dumps([kept, tool_defs or []], ensure_ascii=False))
@@ -436,6 +441,14 @@ class Runner:
         if depth > self._max_depth:
             raise BudgetExceeded("Sub-agent depth budget exhausted")
         tools: list[BaseTool] = agent.resolve_tools() if hasattr(agent, "resolve_tools") else []
+        skills = self._skills if not parent else None
+        if skills is not None:
+            additions = skills.tools()
+            if {t.name for t in tools} & {t.name for t in additions}:
+                raise ValueError("Skill tool names conflict with existing tools")
+            tools = tools + additions
+            agent = agent.model_copy(update={"tools": tools})
+        reported_skills: set[str] = set()
         agent_name = getattr(agent, "name", "assistant")
 
         async def run_child(child: Any, value: Any, child_ctx: Context) -> str:
@@ -614,6 +627,18 @@ class Runner:
                 raise _Interrupted(list(interrupts))
         for _ in range(self._max_turns):
             tool_defs = [tool.to_llm_tool() for tool in tools]
+            if skills is not None:
+                skill_messages = await budget.wait(skills.messages(ctx), "skill_seconds")
+                messages = [m for m in messages if m.get("name") not in CONTEXT_NAMES]
+                insert_at = 1 if messages and messages[0]["role"] == "system" else 0
+                messages[insert_at:insert_at] = skill_messages
+                for id in ctx.state.get(STATE_KEY, {}).get("active", []):
+                    if id not in reported_skills:
+                        reported_skills.add(id)
+                        yield await self._record(ctx.session.id, Event(
+                            author=agent_name, type="skill", status="activated", content=id,
+                            metrics={"name": next((r["name"] for r in ctx.state[STATE_KEY]["catalog"] if r["id"] == id), id)},
+                            invocation_id=invocation), budget)
             if self._memory_policy and ctx.memory_state and ctx.memory_state.capture_suppressed:
                 messages = self._memory_messages(ctx.memory_state.retrieved) + [
                     message for message in messages if message.get("name") not in _MEMORY_NAMES
