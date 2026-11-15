@@ -206,7 +206,13 @@ def build_argv(
 
 
 def build_control_argv(executable: str) -> list[str]:
-    """Sesión aislada solo para el protocolo de control (p. ej. listar modelos). Sin inferencia."""
+    """Sesión aislada solo para el protocolo de control (p. ej. listar modelos). Sin inferencia.
+
+    No usa ``--safe-mode``: con él el CLI solo anuncia los alias (5 modelos) y no las versiones
+    concretas que la cuenta puede usar. El aislamiento lo da ``--setting-sources ""`` (ni ajustes,
+    ni hooks, ni plugins del usuario) junto al resto de flags. La inferencia sí sigue en safe mode y
+    acepta esos ids.
+    """
     return [
         executable,
         "-p",
@@ -222,7 +228,8 @@ def build_control_argv(executable: str) -> list[str]:
         "mcp__*",
         "--strict-mcp-config",
         "--restricted",
-        "--safe-mode",
+        "--setting-sources",
+        "",
         "--disable-slash-commands",
         "--permission-mode",
         "dontAsk",

@@ -400,7 +400,53 @@ async def test_list_models_uses_the_control_protocol_without_inference() -> None
     assert models[1].efforts == ["low", "max"] and models[1].description == "Best"
     call = next(s for s in t.spawned if "--input-format" in s["argv"])
     assert call["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-mine"
-    assert "--safe-mode" in call["argv"] and "-p" in call["argv"]
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in call["env"]
+    assert call["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+    argv = call["argv"]
+    assert "-p" in argv and "--safe-mode" not in argv
+    assert argv[argv.index("--setting-sources") + 1] == "" and "--strict-mcp-config" in argv
     sent = json.loads(t.main_handles[0].stdin)
     assert sent["type"] == "control_request" and sent["request"] == {"subtype": "initialize"}
     assert parse_models("nope") == []
+
+
+
+def _cli_with_events(events_per_run: list[list[Any]]) -> FakeTransport:
+    return FakeTransport([FakeHandle(events) for events in events_per_run])
+
+
+def _tool_use(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "name": name, "input": arguments}], "usage": {"input_tokens": 7}},
+    }
+
+
+async def test_app_tool_called_directly_is_intercepted_as_a_tool_call() -> None:
+    # El modelo llama a la herramienta de la aplicación como si fuera suya: se recoge y se corta.
+    t = _cli_with_events([[INIT, _tool_use("consultar_gastos", {"mes": "marzo"}), final("no debería llegar")]])
+    response = await llm(t).generate_content_async(req(tools=TOOLS))
+    assert response.tool_calls[0].function["name"] == "consultar_gastos"
+    assert json.loads(response.tool_calls[0].function["arguments"]) == {"mes": "marzo"}
+    assert response.metrics["intercepted_tool_calls"] == 1
+    assert t.main_handles[0].terminated >= 1
+
+
+async def test_giving_up_after_native_tool_attempts_is_repaired_once() -> None:
+    t = _cli_with_events(
+        [
+            [INIT, _tool_use("WebFetch", {"url": "x"}), final("no puedo leer páginas")],
+            [INIT, calls(("consultar_gastos", {"mes": "abril"}))],
+        ]
+    )
+    response = await llm(t).generate_content_async(req(tools=TOOLS))
+    assert response.tool_calls[0].function["name"] == "consultar_gastos"
+    assert response.metrics["protocol_repairs"] == 1
+    second_stdin = t.main_handles[1].stdin.decode()
+    assert "WebFetch" in second_stdin and "tool_calls" in second_stdin
+
+
+def test_protocol_tells_the_model_how_to_use_tools() -> None:
+    from nas.adk.models.claude_code import protocol
+
+    assert "never call tools" in protocol.SYSTEM_PROMPT and "tool_calls" in protocol.SYSTEM_PROMPT

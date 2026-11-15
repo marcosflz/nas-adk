@@ -153,6 +153,9 @@ class ClaudeCodeLlm(BaseLlm):
         """
         env = self._child_env()
         path, _ = await self._prepare(env)
+        # El catálogo de modelos de la cuenta llega con el tráfico «no esencial» del CLI (solo con
+        # Anthropic). Sin él solo anuncia 5 alias; esta sesión no hace inferencia.
+        env.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
         argv = isolation.build_control_argv(path)
         request_id = f"nas-models-{time.monotonic_ns()}"
         request = {"type": "control_request", "request_id": request_id, "request": {"subtype": "initialize"}}
@@ -189,7 +192,11 @@ class ClaudeCodeLlm(BaseLlm):
     # ------------------------------------------------------------------ ejecución
 
     async def _run_cli(
-        self, stdin_text: str, schema: dict[str, Any], effort: str | None
+        self,
+        stdin_text: str,
+        schema: dict[str, Any],
+        effort: str | None,
+        intercept: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """Una invocación aislada. Devuelve el mensaje ``result`` (con metadatos añadidos)."""
         data = stdin_text.encode("utf-8")
@@ -213,7 +220,7 @@ class ClaudeCodeLlm(BaseLlm):
         )
         async with self._get_semaphore():
             try:
-                return await asyncio.wait_for(self._execute(argv, env, data), self.timeout)
+                return await asyncio.wait_for(self._execute(argv, env, data, intercept), self.timeout)
             except asyncio.TimeoutError as error:
                 raise LlmTimeoutError(
                     f"Claude Code did not finish within {self.timeout:g}s", cause=error
@@ -224,12 +231,24 @@ class ClaudeCodeLlm(BaseLlm):
             self._semaphore = asyncio.Semaphore(self.max_concurrency)
         return self._semaphore
 
-    async def _execute(self, argv: list[str], env: dict[str, str], data: bytes) -> dict[str, Any]:
+    async def _execute(
+        self,
+        argv: list[str],
+        env: dict[str, str],
+        data: bytes,
+        intercept: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        """Una invocación. ``intercept``: herramientas de la aplicación que, si el modelo las
+        llama como herramienta *propia* del CLI (``tool_use``) en vez de por el protocolo, se
+        recogen y se corta el proceso: el CLI solo respondería «herramienta no disponible»."""
         with tempfile.TemporaryDirectory(prefix="nas-cc-") as cwd:
             handle = await self._transport().spawn(argv, env=env, cwd=cwd)
             rate_rejected: dict[str, Any] | None = None
             assistant_error: str | None = None
             result: dict[str, Any] | None = None
+            native_attempts: list[str] = []
+            intercepted: list[dict[str, Any]] = []
+            last_usage: dict[str, Any] | None = None
             try:
                 await handle.write_stdin(data)
                 async for raw in handle.stdout_lines():
@@ -249,15 +268,37 @@ class ClaudeCodeLlm(BaseLlm):
                         info = event.get("rate_limit_info") or {}
                         if info.get("status") == "rejected":
                             rate_rejected = info
-                    elif kind == "assistant" and event.get("error"):
-                        assistant_error = str(event["error"])
+                    elif kind == "assistant":
+                        if event.get("error"):
+                            assistant_error = str(event["error"])
+                        message = event.get("message") or {}
+                        if isinstance(message.get("usage"), dict):
+                            last_usage = message["usage"]
+                        for block in message.get("content") or []:
+                            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                                continue
+                            name = str(block.get("name") or "")
+                            if name == "StructuredOutput":
+                                continue
+                            native_attempts.append(name)
+                            if name in intercept and isinstance(block.get("input"), dict):
+                                intercepted.append({"name": name, "arguments": block["input"]})
+                        if intercepted:
+                            break
                     elif kind == "result":
                         result = event
                         break
-                code = await handle.wait() if result is None else 0
+                code = await handle.wait() if result is None and not intercepted else 0
                 tail = isolation.redact(handle.stderr_tail())
             finally:
                 await handle.terminate()
+        if intercepted:
+            return {
+                "_intercepted": intercepted,
+                "_native_attempts": native_attempts,
+                "usage": last_usage or {},
+                "subtype": "intercepted",
+            }
         if result is None:
             raise LlmProcessError(
                 f"Claude Code exited with code {code} without a result"
@@ -265,6 +306,7 @@ class ClaudeCodeLlm(BaseLlm):
             )
         result["_rate_rejected"] = rate_rejected
         result["_assistant_error"] = assistant_error
+        result["_native_attempts"] = native_attempts
         return result
 
     @staticmethod
@@ -327,6 +369,9 @@ class ClaudeCodeLlm(BaseLlm):
             "claude_code_schema_mode": mode,
             "protocol_repairs": repairs,
             "ignored_parameters": ignored,
+            "num_turns": result.get("num_turns"),
+            "native_tool_attempts": list(result.get("_native_attempts") or []),
+            "intercepted_tool_calls": len(result.get("_intercepted") or []),
             "session_id": result.get("session_id"),
             "cost_usd": None,
         }
@@ -357,11 +402,21 @@ class ClaudeCodeLlm(BaseLlm):
         repairs = 0
         while True:
             stdin_text = proto.build_stdin(request.messages, registry, descriptions, repair_note=note)
-            result = await self._run_cli(stdin_text, schema, effort)
-            self._raise_for_result(result)
+            result = await self._run_cli(stdin_text, schema, effort, frozenset(registry))
+            if result.get("_intercepted"):
+                # El modelo llamó a una herramienta de la aplicación como si fuera suya: se trata
+                # como la decisión `tool_calls` que debía haber devuelto (se valida igual).
+                payload: Any = {
+                    "protocol_version": proto.PROTOCOL_VERSION,
+                    "kind": "tool_calls",
+                    "calls": result["_intercepted"][: self.max_tool_calls],
+                }
+            else:
+                self._raise_for_result(result)
+                payload = result["structured_output"]
             try:
                 decision = proto.parse_decision(
-                    result["structured_output"],
+                    payload,
                     registry,
                     output_schema,
                     max_calls=self.max_tool_calls,
@@ -372,6 +427,16 @@ class ClaudeCodeLlm(BaseLlm):
                     raise
                 repairs += 1
                 note = str(error)
+                continue
+            attempts = [n for n in result.get("_native_attempts") or [] if n not in registry]
+            if decision.kind == "final" and registry and attempts and repairs < self.protocol_repairs:
+                # Intentó herramientas propias del CLI (que no existen aquí) y se rindió: se le
+                # recuerda una vez que debe pedirlas por el protocolo.
+                repairs += 1
+                note = (
+                    f"You tried to call {sorted(set(attempts))} directly; those are not available. "
+                    "To use a tool, return kind \"tool_calls\" with a tool from AVAILABLE_TOOLS."
+                )
                 continue
             return LlmResponse(
                 content=decision.text,
