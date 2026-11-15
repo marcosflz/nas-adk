@@ -16,7 +16,7 @@ import tempfile
 import time
 from typing import Any, ClassVar, Literal
 
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, SecretStr
 
 from nas.adk.models.base_llm import BaseLlm, LlmRequest, LlmResponse, ModelCapabilities
 from nas.adk.models.claude_code import isolation
@@ -76,6 +76,13 @@ class ClaudeCodeLlm(BaseLlm):
     auth_check_ttl: float = Field(
         default_factory=lambda: env_float("CLAUDE_CODE_AUTH_CHECK_TTL", 300.0), ge=0
     )
+    oauth_token: SecretStr | None = Field(default=None, repr=False)
+    """Token de suscripción (``claude setup-token``) solo para los procesos de esta instancia.
+
+    Se inyecta como ``CLAUDE_CODE_OAUTH_TOKEN`` en la copia del entorno del proceso hijo, nunca
+    en ``os.environ``: así varias instancias con cuentas distintas pueden convivir en el mismo
+    proceso sin pisarse. Sin él, el CLI usa su login propio o la variable del entorno.
+    """
     transport: Any = None
 
     supports_streaming: ClassVar[bool] = False
@@ -94,6 +101,12 @@ class ClaudeCodeLlm(BaseLlm):
     _auth_ok_until: float = PrivateAttr(default=0.0)
 
     # ------------------------------------------------------------------ preparación
+
+    def _child_env(self) -> dict[str, str]:
+        env = isolation.build_child_env(os.environ, policy=self.env_policy)
+        if self.oauth_token is not None:
+            env[isolation.OAUTH_TOKEN_VAR] = self.oauth_token.get_secret_value()
+        return env
 
     def _transport(self) -> ProcessTransport:
         if self.transport is None:
@@ -143,7 +156,7 @@ class ClaudeCodeLlm(BaseLlm):
         schema_json = json.dumps(schema, separators=(",", ":"))
         if len(schema_json.encode()) > isolation_arg_limit():
             raise LlmRequestError("Output schema is too large to pass to Claude Code")
-        env = isolation.build_child_env(os.environ, policy=self.env_policy)
+        env = self._child_env()
         path, optional = await self._prepare(env)
         argv = isolation.build_argv(
             path,

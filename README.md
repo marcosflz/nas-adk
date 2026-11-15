@@ -90,12 +90,31 @@ model = ModelRouter(provider="anthropic", model="<id de modelo>")  # ANTHROPIC_A
 
 #### `claude-code` (suscripción local)
 
-Requisitos: Claude Code instalado y autenticado **por ti** (`claude auth login`) con tu
-suscripción. NAS nunca inicia login, no lee ni copia tokens y no usa endpoints privados.
+Requisitos: Claude Code instalado y autenticado **por ti** con tu suscripción
+(`claude auth login`, o un token de `claude setup-token` en `CLAUDE_CODE_OAUTH_TOKEN`). NAS
+nunca inicia un login por su cuenta, no lee ni copia las credenciales guardadas del CLI y no usa
+endpoints privados.
 
 ```python
 model = ModelRouter(provider="claude-code")  # CLAUDE_CODE_MODEL es opcional
 ```
+
+- **Token por instancia.** `ClaudeCodeLlm(oauth_token=...)` pasa el token solo al proceso hijo
+  de esa instancia (`os.environ` no se toca), así que una aplicación con varias personas puede
+  usar la cuenta de cada una sin que un run vea la de otro. Sin `oauth_token` vale el login del
+  CLI o `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Vincular desde una aplicación.** `SetupTokenSession` ejecuta el `claude setup-token`
+  oficial en un pseudo-terminal con un `HOME` temporal: `start()` devuelve la URL de
+  autorización que muestra el CLI, `submit(code)` le pasa el código que la persona copia tras
+  autorizar y devuelve su token (`sk-ant-oat01-…`, un año), y `close()` termina el proceso y
+  borra el `HOME`. Solo se lanza desde una acción explícita del titular. NAS no reimplementa el
+  OAuth de Anthropic. Guarda el token cifrado y asociado a esa persona; no lo compartas.
+
+  ```python
+  async with SetupTokenSession() as login:
+      url = await login.start()          # muéstrasela al titular de la cuenta
+      token = await login.submit(code)   # el código que pega tras autorizar
+  ```
 
 - **Uso personal y local.** Las condiciones de Anthropic piden API key para productos o
   servicios y no permiten enrutar peticiones de terceros por credenciales de suscripción. Este

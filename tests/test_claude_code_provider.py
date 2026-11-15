@@ -323,3 +323,30 @@ def test_router_rules(monkeypatch: pytest.MonkeyPatch) -> None:
         ModelRouter(provider="claude", model="x")
     monkeypatch.setenv("NAS_MODEL_BASE_URL", "https://x")
     assert not ModelRouter(provider="claude-code").base_url
+
+
+async def test_oauth_token_is_per_instance_and_only_in_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    def slow() -> FakeHandle:
+        return FakeHandle([INIT, final("ok")])
+
+    ta = FakeTransport([slow])
+    tb = FakeTransport([slow])
+    a = llm(ta, oauth_token="sk-ant-oat01-account-a")
+    b = llm(tb, oauth_token="sk-ant-oat01-account-b")
+    await asyncio.gather(a.generate_content_async(req()), b.generate_content_async(req()))
+    for transport, token in ((ta, "sk-ant-oat01-account-a"), (tb, "sk-ant-oat01-account-b")):
+        assert transport.spawned  # auth status y la llamada principal
+        assert all(s["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == token for s in transport.spawned)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+    assert "account-a" not in repr(a)
+
+
+async def test_oauth_token_overrides_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-from-env")
+    t = FakeTransport([FakeHandle([INIT, final("ok")])])
+    await llm(t, oauth_token="sk-ant-oat01-mine").generate_content_async(req())
+    assert t.main_calls[0]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-mine"
+    t = FakeTransport([FakeHandle([INIT, final("ok")])])
+    await llm(t).generate_content_async(req())
+    assert t.main_calls[0]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-from-env"

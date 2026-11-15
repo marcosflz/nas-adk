@@ -36,6 +36,9 @@ REQUIRED_FLAGS = (
     "--system-prompt",
 )
 
+# Credencial de suscripción que el CLI acepta por entorno (la genera `claude setup-token`).
+OAUTH_TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+
 # Variables que pueden cambiar el backend o la credencial (y por tanto la facturación).
 BILLING_EXACT = frozenset(
     {
@@ -125,7 +128,8 @@ def check_auth_status(stdout: str, exit_code: int) -> None:
     if exit_code != 0 or not isinstance(status, dict) or not status.get("loggedIn"):
         raise LlmAuthError(
             "Claude Code is not logged in. Run `claude auth login` yourself with your "
-            "subscription; NAS never starts a login."
+            "subscription, or pass a `claude setup-token` token; NAS never starts a login "
+            "on its own."
         )
     method = status.get("authMethod")
     provider = status.get("apiProvider")
